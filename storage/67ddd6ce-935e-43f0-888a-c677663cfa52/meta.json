@@ -1,0 +1,1 @@
+{"jobId": "67ddd6ce-935e-43f0-888a-c677663cfa52", "tool": "excel-to-pdf", "deleteToken": "938f2cd3780e4c26a33808f8bf39a3f5", "inputs": [{"path": "D:\\demo-project-tychora\\Converter-tool\\backend\\storage\\67ddd6ce-935e-43f0-888a-c677663cfa52\\in\\1.xlsx", "name": "Student_Details.xlsx", "size": 5312}], "options": {"orientation": "auto", "fitWidth": true, "sheets": "all"}}

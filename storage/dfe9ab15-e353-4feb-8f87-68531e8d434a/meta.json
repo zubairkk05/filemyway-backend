@@ -1,0 +1,1 @@
+{"jobId": "dfe9ab15-e353-4feb-8f87-68531e8d434a", "tool": "image-converter", "deleteToken": "760a5ebc746d46f09f34eaf9ab2be653", "inputs": [{"path": "D:\\demo-project-tychora\\Converter-tool\\backend\\storage\\dfe9ab15-e353-4feb-8f87-68531e8d434a\\in\\1.png", "name": "tychora-banner.png", "size": 72212}], "options": {"format": "webp", "quality": 100}}

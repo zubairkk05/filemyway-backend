@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pikepdf
+Pillow
+pypdfium2
+openpyxl
+python-pptx
+pillow-heif
+reportlab
+pdfplumber
+a2wsgi
