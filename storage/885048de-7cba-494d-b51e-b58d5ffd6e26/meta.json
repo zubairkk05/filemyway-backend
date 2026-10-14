@@ -1,1 +1,0 @@
-{"jobId": "885048de-7cba-494d-b51e-b58d5ffd6e26", "tool": "excel-to-pdf", "deleteToken": "8e5f6ff147da4d968511b4a120973994", "inputs": [{"path": "D:\\demo-project-tychora\\Converter-tool\\backend\\storage\\885048de-7cba-494d-b51e-b58d5ffd6e26\\in\\1.xlsx", "name": "Teacher Email.xlsx", "size": 11786}], "options": {"orientation": "tall", "fitWidth": true, "sheets": "all"}}
