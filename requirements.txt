@@ -9,4 +9,3 @@ python-pptx
 pillow-heif
 reportlab
 pdfplumber
-a2wsgi

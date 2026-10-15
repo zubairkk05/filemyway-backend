@@ -48,7 +48,7 @@ class Settings:
         self.PY_WORKER_TIMEOUT_SEC: int = int(
             os.environ.get("PY_WORKER_TIMEOUT_SEC", "300")
         )
-        self.PY_WORKER_MEM_MB: int = int(os.environ.get("PY_WORKER_MEM_MB", "1024"))
+        self.PY_WORKER_MEM_MB: int = int(os.environ.get("PY_WORKER_MEM_MB", "0"))
 
 
 settings = Settings()

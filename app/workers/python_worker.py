@@ -22,10 +22,21 @@ except ImportError:  # pragma: no cover - platform dependent
 
 
 def _apply_memory_limit() -> None:
+    """Cap the process address space, but only when explicitly requested.
+
+    Jobs run on an in-process thread pool, so an ``RLIMIT_AS`` here would
+    throttle the whole web process (and breaks Passenger/lswsgi spawns).
+    Default is disabled: set ``PY_WORKER_MEM_MB`` to a positive value to enable.
+    """
     if not _HAS_RESOURCE:
         return
     try:
-        mem_mb = int(os.environ.get("PY_WORKER_MEM_MB", "1024"))
+        mem_mb = int(os.environ.get("PY_WORKER_MEM_MB", "0"))
+    except ValueError:
+        return
+    if mem_mb <= 0:
+        return
+    try:
         limit = mem_mb * 1024 * 1024
         resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
     except (ValueError, OSError):
