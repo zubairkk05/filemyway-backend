@@ -61,6 +61,11 @@ def _force_remove_tree(path) -> None:
 
 _CLEANUP_INTERVAL_SEC = 600
 _DELETE_MARKER = ".delete-after"
+# Never erase a job whose tree was touched within this window: a worker may
+# still be writing progress.json/result.json into it.
+_DELETE_MIN_AGE_SEC = 60.0
+# Fallback for jobs that never produced a result.json (stuck/crashed workers).
+_ORPHAN_MAX_AGE_SEC = 6 * 3600.0
 _last_cleanup = 0.0
 
 
@@ -90,9 +95,41 @@ def _delete_deadline(job_dir: Path) -> Optional[float]:
         return time.time()
 
 
+def _job_finalized(job_dir: Path) -> bool:
+    """True once the worker has written a final ``result.json`` (ok or error)."""
+    result = _read_json(job_dir / "result.json")
+    return isinstance(result, dict) and "ok" in result
+
+
+def _safe_to_delete(job_dir: Path) -> bool:
+    """Guard against erasing a job whose worker is still writing files.
+
+    Requires a real job (``meta.json`` is written by the API before the worker
+    starts) and a minimum idle age, so a folder that was just created or is
+    being updated right now is skipped. Without this, a sweep could delete a
+    job mid-run and the worker would recreate the folder with only
+    ``progress.json`` / ``result.json`` and no inputs.
+    """
+    if not job_dir.is_dir():
+        return False
+    if not (job_dir / "meta.json").exists():
+        return False
+    return _tree_age_seconds(job_dir) >= _DELETE_MIN_AGE_SEC
+
+
+def _guarded_delete(job_dir: Path) -> None:
+    """Remove a job only if it is finished and idle (timer/download path)."""
+    if _safe_to_delete(job_dir) and _job_finalized(job_dir):
+        _force_remove_tree(job_dir)
+
+
 def cleanup_expired_jobs() -> int:
     """Erase jobs whose post-download grace has passed, or that were never
-    downloaded and are older than JOB_TTL_MIN minutes."""
+    downloaded and are older than JOB_TTL_MIN minutes.
+
+    Only finished, idle jobs are ever removed (see ``_safe_to_delete``), so an
+    in-progress job is never deleted while its worker is still writing.
+    """
     root = Path(settings.STORAGE_DIR)
     if not root.exists():
         return 0
@@ -101,10 +138,18 @@ def cleanup_expired_jobs() -> int:
     for entry in root.iterdir():
         if not entry.is_dir():
             continue
+        if not _safe_to_delete(entry):
+            continue
         deadline = _delete_deadline(entry)
-        expired = deadline is not None and time.time() >= deadline
-        if not expired and deadline is None and _tree_age_seconds(entry) > ttl_seconds:
-            expired = True
+        age = _tree_age_seconds(entry)
+        if deadline is not None:
+            expired = time.time() >= deadline
+        elif _job_finalized(entry):
+            expired = age > ttl_seconds
+        else:
+            # Never finished (crashed/stuck worker): reclaim only after a long
+            # grace period so an in-progress job stays safe.
+            expired = age > max(ttl_seconds, _ORPHAN_MAX_AGE_SEC)
         if expired:
             _force_remove_tree(entry)
             removed += 1
@@ -115,7 +160,8 @@ def _schedule_job_deletion(job_dir: Path) -> None:
     """Erase a job a few minutes after it was first downloaded.
 
     Records the deadline in a marker file (so a restart still erases it on the
-    next sweep) and starts a precise timer for the common case.
+    next sweep) and starts a precise timer for the common case. Deletion is
+    guarded so it can never remove a folder a worker is still writing.
     """
     if (job_dir / _DELETE_MARKER).exists():
         return
@@ -124,7 +170,9 @@ def _schedule_job_deletion(job_dir: Path) -> None:
         (job_dir / _DELETE_MARKER).write_text(str(deadline), encoding="utf-8")
     except OSError:
         pass
-    timer = threading.Timer(max(1.0, deadline - time.time()), _force_remove_tree, args=(job_dir,))
+    timer = threading.Timer(
+        max(1.0, deadline - time.time()), _guarded_delete, args=(job_dir,)
+    )
     timer.daemon = True
     timer.start()
 

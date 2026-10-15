@@ -4,28 +4,52 @@ Passenger (via LiteSpeed's ``lswsgi``) only speaks WSGI, while FastAPI is ASGI.
 Wrapping the app with ``a2wsgi.ASGIMiddleware`` hangs under ``lswsgi`` -- the
 request never returns and the child process is killed with ``SIGTERM`` -- so we
 bridge ASGI to WSGI ourselves: each request runs the coroutine synchronously in
-the request thread via ``asyncio.run`` and buffers the response.
+the request thread via ``asyncio.run`` and buffers the response body as a *list
+of chunks* (never a second concatenated copy).
 
-Trade-off: responses are buffered in memory instead of streamed. That is fine
-for this API's JSON replies and one-shot file downloads.
+Why ``receive()`` blocks
+------------------------
+Starlette's ``FileResponse`` starts a ``listen_for_disconnect(receive)`` loop
+next to the file stream. If ``receive()`` returned ``{"type": "http.request"}``
+on every call, that loop would spin without ever yielding, starving the event
+loop -- the download hangs and the worker burns CPU until killed. Instead we
+deliver the request body exactly once and then *block* on an ``asyncio.Event``
+created per request (``asyncio.run`` installs a new event loop each call, so the
+event must not live at module scope). Starlette cancels the blocked listener
+when the response finishes, or it returns ``http.disconnect`` once the final
+body chunk has been sent.
+
+Trade-off: responses are buffered in memory rather than streamed over WSGI.
+Peak RAM per in-flight response is about the size of one output file; per-tool
+caps live in ``app/core/tool_registry.py`` (up to ``max_total_mb``). With
+``CONCURRENCY`` simultaneous downloads that is the worst-case memory ceiling.
 
 cPanel -> "Setup Python App" settings::
 
     Application startup file:  passenger_wsgi.py
     Application Entry point:   application
+
+Reminder: re-saving the cPanel Python App screen regenerates this file from a
+template. Always run ``git checkout -- passenger_wsgi.py`` before/after a
+``git pull`` (or after touching the cPanel UI) and then restart the app.
 """
 
 import asyncio
-import resource
 import sys
 from pathlib import Path
 
 # Passenger may run with a different CWD; make the ``app`` package importable.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+try:  # ``resource`` is POSIX-only; guard so the module also imports on Windows.
+    import resource  # noqa: F401
+except ImportError:  # pragma: no cover - Windows dev only
+    resource = None  # type: ignore[assignment]
+
 # The in-process worker sets RLIMIT_AS on import; never let it throttle the web
-# process (it also breaks Passenger's spawn handshake).
-resource.setrlimit = lambda *args, **kwargs: None  # type: ignore[assignment]
+# process (it also breaks Passenger's spawn handshake). No-op where unavailable.
+if resource is not None:
+    resource.setrlimit = lambda *args, **kwargs: None  # type: ignore[assignment]
 
 from app.main import app as _asgi_app  # noqa: E402
 
@@ -102,14 +126,27 @@ def application(environ, start_response):
     body = environ["wsgi.input"].read(length) if length > 0 else b""
 
     scope = _scope_from_environ(environ)
-    captured = {"status": 500, "headers": [], "body": bytearray()}
+    captured = {"status": 500, "headers": [], "body": []}
+
+    # Per-request state: ``asyncio.run`` builds a fresh event loop every call, so
+    # these must be created here (never at module scope).
+    request_delivered = False
+    response_done = asyncio.Event()
 
     async def receive():
-        return {"type": "http.request", "body": body, "more_body": False}
+        nonlocal request_delivered
+        if not request_delivered:
+            request_delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        # Body already delivered: block (yield to the loop) until the response
+        # finishes, instead of returning immediately and spinning.
+        await response_done.wait()
+        return {"type": "http.disconnect"}
 
     async def send(message):
         if message["type"] == "http.response.start":
             captured["status"] = message["status"]
+            # Preserve order and duplicates (e.g. several Set-Cookie headers).
             captured["headers"] = [
                 (
                     k.decode("latin-1") if isinstance(k, bytes) else str(k),
@@ -118,7 +155,12 @@ def application(environ, start_response):
                 for k, v in message.get("headers", [])
             ]
         elif message["type"] == "http.response.body":
-            captured["body"].extend(message.get("body", b""))
+            chunk = message.get("body", b"")
+            if chunk:
+                captured["body"].append(chunk)
+            if not message.get("more_body", False):
+                # Final chunk: release the disconnect listener cleanly.
+                response_done.set()
 
     try:
         asyncio.run(_asgi_app(scope, receive, send))
@@ -126,9 +168,14 @@ def application(environ, start_response):
         import traceback
 
         traceback.print_exc()
-        start_response("500 Internal Server Error", [("Content-Type", "text/plain")])
+        start_response(
+            "500 Internal Server Error",
+            [("Content-Type", "text/plain; charset=utf-8")],
+        )
         return [f"Internal Server Error: {exc}".encode("utf-8")]
 
     status = captured["status"]
     start_response(f"{status} {_REASONS.get(status, 'OK')}", captured["headers"])
-    return [bytes(captured["body"])]
+    # The body is already a list of bytes chunks; hand it straight to the server
+    # so we never build a second concatenated copy.
+    return captured["body"] or [b""]
